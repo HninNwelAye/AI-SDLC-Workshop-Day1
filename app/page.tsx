@@ -1,0 +1,356 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+import { Todo, Priority } from '@/lib/types';
+import { formatSingaporeDate } from '@/lib/timezone';
+import { PriorityBadge } from '@/components/PriorityBadge';
+import { PrioritySelector } from '@/components/PrioritySelector';
+import { PriorityFilter } from '@/components/PriorityFilter';
+
+export default function TodosPage() {
+  const [todos, setTodos] = useState<Todo[]>([]);
+  const [newTitle, setNewTitle] = useState('');
+  const [newDueDate, setNewDueDate] = useState('');
+  const [newPriority, setNewPriority] = useState<Priority>('medium');
+  const [priorityFilter, setPriorityFilter] = useState<Priority | 'all'>('all');
+  const [priorityCounts, setPriorityCounts] = useState({ high: 0, medium: 0, low: 0 });
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editDueDate, setEditDueDate] = useState('');
+  const [editPriority, setEditPriority] = useState<Priority>('medium');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  // Fetch todos on mount
+  useEffect(() => {
+    fetchTodos();
+    fetchPriorityCounts();
+  }, []);
+
+  const fetchTodos = async () => {
+    try {
+      const response = await fetch('/api/todos');
+      if (!response.ok) throw new Error('Failed to fetch todos');
+      const data = await response.json();
+      setTodos(data);
+    } catch (err) {
+      setError('Failed to load todos');
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchPriorityCounts = async () => {
+    try {
+      const response = await fetch('/api/todos/priority-counts');
+      if (!response.ok) throw new Error('Failed to fetch counts');
+      const data = await response.json();
+      setPriorityCounts(data);
+    } catch (err) {
+      console.error('Error fetching priority counts:', err);
+    }
+  };
+
+  // Sorting function for priority
+  const sortByPriority = (a: Todo, b: Todo) => {
+    const priorityOrder = { high: 0, medium: 1, low: 2 };
+    const aPriority = priorityOrder[a.priority];
+    const bPriority = priorityOrder[b.priority];
+    
+    if (aPriority !== bPriority) {
+      return aPriority - bPriority;
+    }
+    
+    // Same priority: sort by creation date (newest first)
+    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+  };
+
+  // Filter todos by priority
+  const filteredTodos = priorityFilter === 'all' 
+    ? todos 
+    : todos.filter(t => t.priority === priorityFilter);
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTitle.trim()) return;
+
+    const optimisticTodo: Todo = {
+      id: Date.now(), // Temporary ID
+      user_id: 0,
+      title: newTitle.trim(),
+      completed: false,
+      priority: newPriority,
+      due_date: newDueDate || null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    // Optimistic update with proper sorting
+    setTodos([optimisticTodo, ...todos].sort(sortByPriority));
+    setNewTitle('');
+    setNewDueDate('');
+    setNewPriority('medium');
+
+    try {
+      const response = await fetch('/api/todos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: newTitle.trim(),
+          priority: newPriority,
+          due_date: newDueDate || null,
+        }),
+      });
+
+      if (!response.ok) throw new Error('Failed to create todo');
+      const createdTodo = await response.json();
+
+      // Replace optimistic todo with real one
+      setTodos(todos => todos.map(t => t.id === optimisticTodo.id ? createdTodo : t));
+      fetchPriorityCounts();
+    } catch (err) {
+      // Rollback optimistic update
+      setTodos(todos => todos.filter(t => t.id !== optimisticTodo.id));
+      setError('Failed to create todo');
+      console.error(err);
+    }
+  };
+
+  const handleToggleComplete = async (todo: Todo) => {
+    const newCompleted = !todo.completed;
+
+    // Optimistic update
+    setTodos(todos => todos.map(t =>
+      t.id === todo.id ? { ...t, completed: newCompleted } : t
+    ));
+
+    try {
+      const response = await fetch(`/api/todos/${todo.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ completed: newCompleted }),
+      });
+
+      if (!response.ok) throw new Error('Failed to update todo');
+      const updatedTodo = await response.json();
+      setTodos(todos => todos.map(t => t.id === todo.id ? updatedTodo : t));
+    } catch (err) {
+      // Rollback optimistic update
+      setTodos(todos => todos.map(t =>
+        t.id === todo.id ? { ...t, completed: !newCompleted } : t
+      ));
+      setError('Failed to update todo');
+      console.error(err);
+    }
+  };
+
+  const handleEdit = (todo: Todo) => {
+    setEditingId(todo.id);
+    setEditTitle(todo.title);
+    setEditDueDate(todo.due_date || '');
+    setEditPriority(todo.priority);
+  };
+
+  const handleSaveEdit = async (todo: Todo) => {
+    if (!editTitle.trim()) return;
+
+    const originalTodo = todo;
+
+    // Optimistic update
+    setTodos(todos => todos.map(t =>
+      t.id === todo.id 
+        ? { ...t, title: editTitle.trim(), due_date: editDueDate || null, priority: editPriority } 
+        : t
+    ).sort(sortByPriority));
+    setEditingId(null);
+
+    try {
+      const response = await fetch(`/api/todos/${todo.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: editTitle.trim(),
+          priority: editPriority,
+          due_date: editDueDate || null,
+        }),
+      });
+
+      if (!response.ok) throw new Error('Failed to update todo');
+      const updatedTodo = await response.json();
+      setTodos(todos => todos.map(t => t.id === todo.id ? updatedTodo : t).sort(sortByPriority));
+      fetchPriorityCounts();
+    } catch (err) {
+      // Rollback optimistic update
+      setTodos(todos => todos.map(t => t.id === todo.id ? originalTodo : t));
+      setEditingId(todo.id);
+      setError('Failed to update todo');
+      console.error(err);
+    }
+  };
+
+  const handleDelete = async (todo: Todo) => {
+    if (!confirm('Are you sure you want to delete this todo?')) return;
+
+    const originalTodos = [...todos];
+
+    // Optimistic update
+    setTodos(todos => todos.filter(t => t.id !== todo.id));
+
+    try {
+      const response = await fetch(`/api/todos/${todo.id}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) throw new Error('Failed to delete todo');
+    } catch (err) {
+      // Rollback optimistic update
+      setTodos(originalTodos);
+      setError('Failed to delete todo');
+      console.error(err);
+    }
+  };
+
+  if (loading) return <div className="p-4">Loading todos...</div>;
+
+  return (
+    <div className="max-w-4xl mx-auto p-4">
+      <h1 className="text-3xl font-bold mb-6">My Todos</h1>
+
+      {error && (
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+          {error}
+        </div>
+      )}
+
+      {/* Priority Filter */}
+      <PriorityFilter
+        selectedPriority={priorityFilter}
+        onFilterChange={setPriorityFilter}
+        counts={priorityCounts}
+      />
+
+      {/* Create Todo Form */}
+      <form onSubmit={handleCreate} className="mb-6 flex gap-2">
+        <input
+          type="text"
+          value={newTitle}
+          onChange={(e) => setNewTitle(e.target.value)}
+          placeholder="What needs to be done?"
+          className="flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+          maxLength={500}
+        />
+        {/* Priority Selector */}
+        <PrioritySelector
+          value={newPriority}
+          onChange={setNewPriority}
+        />
+        <input
+          type="date"
+          value={newDueDate}
+          onChange={(e) => setNewDueDate(e.target.value)}
+          className="px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        <button
+          type="submit"
+          className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+          disabled={!newTitle.trim()}
+        >
+          Add
+        </button>
+      </form>
+
+      {/* Todo List */}
+      <div className="space-y-2">
+        {filteredTodos.length === 0 ? (
+          <p className="text-gray-500 text-center py-8">
+            {priorityFilter === 'all' 
+              ? 'No todos yet. Create one above!' 
+              : `No ${priorityFilter} priority todos.`
+            }
+          </p>
+        ) : (
+          filteredTodos.map(todo => (
+            <div
+              key={todo.id}
+              className="flex items-center gap-3 p-4 bg-white border rounded-lg shadow-sm hover:shadow-md transition"
+            >
+              {/* Checkbox */}
+              <input
+                type="checkbox"
+                checked={todo.completed}
+                onChange={() => handleToggleComplete(todo)}
+                className="w-5 h-5 cursor-pointer"
+              />
+
+              {/* Todo Content */}
+              {editingId === todo.id ? (
+                <>
+                  <input
+                    type="text"
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    className="flex-1 px-2 py-1 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    maxLength={500}
+                  />
+                  {/* Priority Selector in Edit Mode */}
+                  <PrioritySelector
+                    value={editPriority}
+                    onChange={setEditPriority}
+                  />
+                  <input
+                    type="date"
+                    value={editDueDate}
+                    onChange={(e) => setEditDueDate(e.target.value)}
+                    className="px-2 py-1 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <button
+                    onClick={() => handleSaveEdit(todo)}
+                    className="px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600"
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={() => setEditingId(null)}
+                    className="px-3 py-1 bg-gray-300 rounded hover:bg-gray-400"
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      {/* Priority Badge */}
+                      <PriorityBadge priority={todo.priority} />
+                      <p className={`${todo.completed ? 'line-through text-gray-400' : ''}`}>
+                        {todo.title}
+                      </p>
+                    </div>
+                    {todo.due_date && (
+                      <p className="text-sm text-gray-500">
+                        Due: {formatSingaporeDate(todo.due_date, 'MMM dd, yyyy')}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => handleEdit(todo)}
+                    className="px-3 py-1 text-blue-500 hover:bg-blue-50 rounded"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => handleDelete(todo)}
+                    className="px-3 py-1 text-red-500 hover:bg-red-50 rounded"
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
